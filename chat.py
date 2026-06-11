@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Chat de VERDADE no terminal — 100% local, sem API, sem nuvem.
+Chat local no terminal com um modelo da MESMA FAMÍLIA ARQUITETURAL deste repositório:
+híbrido Mamba-2 (SSD) + atenção — como o backbone de hjepa/ — já instruído a conversar.
 
-Roda um modelo aberto instruction-tuned (padrão: Qwen3-0.6B, Apache-2.0) em CPU,
-com streaming e "modo pensar": digite /pensar e você passa a VER a introspecção
-do modelo (em cinza) antes de cada resposta.
+Padrão: Falcon-H1-0.5B-Instruct (TII, Apache-2.0): camadas híbridas Mamba-2+atenção,
+rodando 100% em CPU, sem API, sem nuvem.
 
-    .venv/bin/python chat.py                          # 1º uso baixa ~1,5 GB
-    .venv/bin/python chat.py --model Qwen/Qwen3-1.7B  # mais esperto (se tiver RAM)
+    .venv/bin/python chat.py                                        # 1º uso baixa ~1 GB
+    .venv/bin/python chat.py --model tiiuae/Falcon-H1-1.5B-Deep-Instruct   # mais esperto, mais lento
+    .venv/bin/python chat.py --model ibm-granite/granite-4.0-h-tiny # híbrido Mamba-2 + MoE (como o nosso!)
 
-Por que não é o H-JEPA-SSM-MoE deste repo conversando? Conversar exige bilhões de
-parâmetros + instruction tuning (ver PAPER.md §5). Este chat.py existe para a
-EXPERIÊNCIA de conversar com um modelo local; o hjepa/ existe para a ENGENHARIA
-da arquitetura. São peças complementares do mesmo estudo.
+Por que o nosso checkpoint (lm_machado.pt) não conversa? Conversar exige bilhões de
+parâmetros + instruction tuning (PAPER.md §5). O Falcon-H1 é o "primo crescido" da
+arquitetura: mesma engenharia de backbone, escala e treino de verdade.
 """
 
 from __future__ import annotations
@@ -33,8 +33,7 @@ SYSTEM_PROMPT = (
     "Você é o Brás, um assistente batizado em homenagem a Brás Cubas, rodando 100% "
     "offline no computador do usuário, sem nenhuma conexão com a nuvem. Você é "
     "reflexivo, bem-humorado e direto. Responde sempre em português do Brasil, em "
-    "tom de conversa; admite sem rodeios quando não sabe algo; e quando o assunto "
-    "pede, gosta de pensar em voz alta antes de concluir."
+    "tom de conversa, e admite sem rodeios quando não sabe algo."
 )
 
 GREY, RESET = "\033[90m", "\033[0m"
@@ -51,14 +50,12 @@ class _StopOnEvent(StoppingCriteria):
         return self.event.is_set()
 
 
-def build_inputs(tokenizer, history: list[dict], thinking: bool):
+def build_inputs(tokenizer, history: list[dict]):
     """Aplica o chat template; descarta turnos antigos se estourar o orçamento."""
     while True:
         msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + history
         prompt = tokenizer.apply_chat_template(
-            msgs, tokenize=False, add_generation_prompt=True,
-            enable_thinking=thinking,
-        )
+            msgs, tokenize=False, add_generation_prompt=True)
         ids = tokenizer(prompt, return_tensors="pt")
         if ids.input_ids.shape[1] <= CONTEXT_TOKEN_BUDGET or len(history) <= 2:
             return ids
@@ -66,12 +63,11 @@ def build_inputs(tokenizer, history: list[dict], thinking: bool):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Chat local (CPU) com modelo aberto")
-    parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--max-new", type=int, default=600)
+    parser = argparse.ArgumentParser(
+        description="Chat local (CPU) com modelo híbrido Mamba-2+atenção")
+    parser.add_argument("--model", default="tiiuae/Falcon-H1-0.5B-Instruct")
+    parser.add_argument("--max-new", type=int, default=400)
     parser.add_argument("--temp", type=float, default=0.7)
-    parser.add_argument("--thinking", action="store_true",
-                        help="começa com o modo pensar ligado")
     args = parser.parse_args()
 
     print(f"[setup] carregando {args.model} (a primeira vez baixa o modelo)…")
@@ -80,14 +76,13 @@ def main() -> None:
     model.eval()
     n_par = sum(p.numel() for p in model.parameters()) / 1e9
 
-    thinking = args.thinking
     history: list[dict] = []
 
     print("┌" + "─" * 74)
     print(f"│ Brás · {args.model} ({n_par:.1f}B params) · 100% local, CPU")
-    print("│ Converse normalmente. Comandos: /pensar (vê a introspecção em cinza),")
-    print("│ /limpar (zera a memória), /sair. Ctrl+C corta uma resposta no meio.")
-    print(f"│ modo pensar: {'LIGADO' if thinking else 'desligado'}")
+    print("│ Arquitetura: híbrido Mamba-2 + atenção — a mesma família do hjepa/ deste")
+    print("│ repositório, em escala de verdade e com instruction tuning.")
+    print("│ Comandos: /limpar (zera a memória) · /sair · Ctrl+C corta a resposta.")
     print("└" + "─" * 74)
 
     while True:
@@ -101,10 +96,6 @@ def main() -> None:
         if cmd in ("/sair", "/quit", "/exit"):
             print("até mais!")
             break
-        if cmd == "/pensar":
-            thinking = not thinking
-            print(f"[ok] modo pensar {'LIGADO — a introspecção aparece em cinza' if thinking else 'desligado'}")
-            continue
         if cmd == "/limpar":
             history = []
             print("[ok] memória da conversa zerada")
@@ -113,18 +104,16 @@ def main() -> None:
             continue
 
         history.append({"role": "user", "content": cmd})
-        ids = build_inputs(tokenizer, history, thinking)
+        ids = build_inputs(tokenizer, history)
 
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True,
                                         skip_special_tokens=True,
                                         clean_up_tokenization_spaces=False)
         stop_event = threading.Event()
-        # amostragem recomendada pelo Qwen3: pensar → 0.6/0.95; direto → temp/0.8
         gen_kwargs = dict(
             **ids, streamer=streamer, max_new_tokens=args.max_new,
-            do_sample=True,
-            temperature=0.6 if thinking else args.temp,
-            top_p=0.95 if thinking else 0.8, top_k=20,
+            do_sample=True, temperature=args.temp, top_p=0.9, top_k=20,
+            repetition_penalty=1.05,
             stopping_criteria=StoppingCriteriaList([_StopOnEvent(stop_event)]),
             pad_token_id=tokenizer.eos_token_id,
         )
@@ -138,21 +127,15 @@ def main() -> None:
         try:
             for piece in streamer:                     # um pedaço por token decodificado
                 pieces.append(piece)
-                shown = piece.replace("<think>", GREY + "┆ pensando… ")
-                shown = shown.replace("</think>", RESET + "\n")
-                sys.stdout.write(shown)
+                sys.stdout.write(piece)
                 sys.stdout.flush()
         except KeyboardInterrupt:
             stop_event.set()
-            sys.stdout.write(RESET + " [interrompido]")
+            sys.stdout.write(" [interrompido]")
         worker.join()
         dt = time.perf_counter() - t0
 
-        reply = "".join(pieces)
-        if "</think>" in reply:                        # só a conclusão vai pra memória
-            reply = reply.split("</think>", 1)[1].lstrip()
-        history.append({"role": "assistant", "content": reply})
-
+        history.append({"role": "assistant", "content": "".join(pieces)})
         n_tok = len(pieces)
         print(f"\n{GREY}[{n_tok} tokens em {dt:.1f}s ≈ {n_tok / max(dt, 1e-9):.1f} tok/s]{RESET}")
 
