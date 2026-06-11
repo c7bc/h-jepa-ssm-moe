@@ -76,3 +76,26 @@ class HybridCharLM(nn.Module):
         if was_training:
             self.train()
         return torch.cat(out, dim=1)
+
+    @torch.no_grad()
+    def generate_stream(self, idx: torch.Tensor, max_new_tokens: int,
+                        temperature: float = 0.8, top_k: int = 40):
+        """
+        Gerador token a token (B = 1) para streaming em terminal: yield de cada id
+        assim que amostrado. Mesmo caminho recorrente O(1)/token do generate().
+        """
+        assert idx.shape[0] == 1, "streaming suporta lote de tamanho 1"
+        self.eval()
+        caches = self.stack.init_cache(1, idx.device)
+        logits = None
+        for t in range(idx.shape[1]):                           # prefill do prompt
+            logits = self._step(idx[:, t], caches)
+        for _ in range(max_new_tokens):
+            lg = logits / max(1e-5, temperature)                # [1, V]
+            if top_k:
+                kth = torch.topk(lg, min(top_k, lg.shape[-1]), dim=-1).values[..., -1:]
+                lg = lg.masked_fill(lg < kth, float("-inf"))
+            probs = torch.softmax(lg, dim=-1)
+            nxt = torch.multinomial(probs, num_samples=1)       # [1, 1]
+            yield int(nxt[0, 0])
+            logits = self._step(nxt.squeeze(1), caches)
