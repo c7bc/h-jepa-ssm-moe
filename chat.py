@@ -25,6 +25,9 @@ import time
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer, StoppingCriteria,
                           StoppingCriteriaList, TextIteratorStreamer)
+from transformers import logging as hf_logging
+
+hf_logging.set_verbosity_error()          # sem warnings no meio da conversa
 
 SYSTEM_PROMPT = (
     "Você é o Brás, um assistente batizado em homenagem a Brás Cubas, rodando 100% "
@@ -113,7 +116,8 @@ def main() -> None:
         ids = build_inputs(tokenizer, history, thinking)
 
         streamer = TextIteratorStreamer(tokenizer, skip_prompt=True,
-                                        skip_special_tokens=True)
+                                        skip_special_tokens=True,
+                                        clean_up_tokenization_spaces=False)
         stop_event = threading.Event()
         # amostragem recomendada pelo Qwen3: pensar → 0.6/0.95; direto → temp/0.8
         gen_kwargs = dict(
