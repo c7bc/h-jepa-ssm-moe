@@ -50,6 +50,16 @@ class _StopOnEvent(StoppingCriteria):
         return self.event.is_set()
 
 
+def _flush_stdin() -> None:
+    """Descarta o que foi digitado fora de hora (durante a resposta do modelo) —
+    evita que o texto "vaze" para o turno seguinte."""
+    try:
+        import termios
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass                                       # pipe/Windows: sem tty, sem problema
+
+
 def build_inputs(tokenizer, history: list[dict]):
     """Aplica o chat template; descarta turnos antigos se estourar o orçamento."""
     while True:
@@ -86,6 +96,7 @@ def main() -> None:
     print("└" + "─" * 74)
 
     while True:
+        _flush_stdin()                             # ignora o que foi digitado fora de hora
         try:
             user = input("\nvocê>  ")
         except (EOFError, KeyboardInterrupt):
@@ -120,12 +131,18 @@ def main() -> None:
         worker = threading.Thread(target=model.generate, kwargs=gen_kwargs)
         worker.start()
 
-        sys.stdout.write("\nbrás>  ")
+        # indicador imediato: a 1ª palavra demora (prefill do histórico em CPU) —
+        # NÃO digite nada aqui; espere a resposta aparecer.
+        sys.stdout.write(f"\nbrás>  {GREY}…formulando (a primeira palavra demora){RESET}")
         sys.stdout.flush()
         pieces: list[str] = []
+        first_piece = True
         t0 = time.perf_counter()
         try:
             for piece in streamer:                     # um pedaço por token decodificado
+                if first_piece:
+                    sys.stdout.write("\r\033[Kbrás>  ")   # apaga o "…formulando"
+                    first_piece = False
                 pieces.append(piece)
                 sys.stdout.write(piece)
                 sys.stdout.flush()
