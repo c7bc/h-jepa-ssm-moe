@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+out/
+.DS_Store
+hf_card.md
